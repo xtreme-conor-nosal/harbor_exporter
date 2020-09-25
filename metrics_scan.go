@@ -10,12 +10,14 @@ import (
 type ScanCollector struct {
 	exporter *HarborExporter
 	metrics  map[string]metricInfo
+	cache    *Cache
 }
 
 func CreateScanCollector(e *HarborExporter) *ScanCollector {
 	sc := ScanCollector{
 		exporter: e,
 		metrics:  make(map[string]metricInfo),
+		cache:    NewCache(cacheEnabled, cacheDuration),
 	}
 	sc.metrics["scans_total"] = newMetricInfo(e.instance, "scans_total", "metrics of the latest scan all process", prometheus.GaugeValue, nil, nil)
 	sc.metrics["scans_completed"] = newMetricInfo(e.instance, "scans_completed", "metrics of the latest scan all process", prometheus.GaugeValue, nil, nil)
@@ -30,6 +32,15 @@ func (sc *ScanCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (sc *ScanCollector) Collect(ch chan<- prometheus.Metric) {
+	if sc.cache.ReplayMetrics(ch) {
+		sc.exporter.scanChan <- true
+		return
+	}
+	samplesCh, wg := sc.cache.StoreAndForwaredMetrics(ch)
+	defer func() {
+		close(samplesCh)
+		wg.Wait()
+	}()
 
 	type scanMetric struct {
 		Total     float64
@@ -48,15 +59,15 @@ func (sc *ScanCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 
 	scan_requester, _ := strconv.ParseFloat(data.Requester, 64)
-	ch <- prometheus.MustNewConstMetric(
+	samplesCh <- prometheus.MustNewConstMetric(
 		sc.metrics["scans_requester"].Desc, sc.metrics["scans_requester"].Type, float64(scan_requester),
 	)
 
-	ch <- prometheus.MustNewConstMetric(
+	samplesCh <- prometheus.MustNewConstMetric(
 		sc.metrics["scans_total"].Desc, sc.metrics["scans_total"].Type, float64(data.Total),
 	)
 
-	ch <- prometheus.MustNewConstMetric(
+	samplesCh <- prometheus.MustNewConstMetric(
 		sc.metrics["scans_completed"].Desc, sc.metrics["scans_completed"].Type, float64(data.Completed),
 	)
 	sc.exporter.scanChan <- true

@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-
 	"github.com/go-kit/kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -10,12 +9,14 @@ import (
 type HealthCollector struct {
 	exporter *HarborExporter
 	metrics  map[string]metricInfo
+	cache    *Cache
 }
 
 func CreateHealthCollector(e *HarborExporter) *HealthCollector {
 	hc := HealthCollector{
 		exporter: e,
 		metrics:  make(map[string]metricInfo),
+		cache:    NewCache(cacheEnabled, cacheDuration),
 	}
 	hc.metrics["health"] = newMetricInfo(e.instance, "health", "Harbor overall health status: Healthy = 1, Unhealthy = 0", prometheus.GaugeValue, nil, nil)
 	hc.metrics["components_health"] = newMetricInfo(e.instance, "components_health", "Harbor components health status: Healthy = 1, Unhealthy = 0", prometheus.GaugeValue, componentLabelNames, nil)
@@ -29,6 +30,15 @@ func (hc *HealthCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (hc *HealthCollector) Collect(ch chan<- prometheus.Metric) {
+	if hc.cache.ReplayMetrics(ch) {
+		hc.exporter.healthChan <- true
+		return
+	}
+	samplesCh, wg := hc.cache.StoreAndForwaredMetrics(ch)
+	defer func() {
+		close(samplesCh)
+		wg.Wait()
+	}()
 	type scanMetric struct {
 		Status     string `json:"status"`
 		Components []struct {
@@ -45,12 +55,12 @@ func (hc *HealthCollector) Collect(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	ch <- prometheus.MustNewConstMetric(
+	samplesCh <- prometheus.MustNewConstMetric(
 		hc.metrics["health"].Desc, hc.metrics["health"].Type, float64(Status2i(data.Status)),
 	)
 
 	for _, c := range data.Components {
-		ch <- prometheus.MustNewConstMetric(
+		samplesCh <- prometheus.MustNewConstMetric(
 			hc.metrics["components_health"].Desc, hc.metrics["components_health"].Type, float64(Status2i(c.Status)), c.Name,
 		)
 	}

@@ -9,12 +9,14 @@ import (
 type VolumeCollector struct {
 	exporter *HarborExporter
 	metrics  map[string]metricInfo
+	cache    *Cache
 }
 
 func CreateVolumeCollector(e *HarborExporter) *VolumeCollector {
 	vc := VolumeCollector{
 		exporter: e,
 		metrics:  make(map[string]metricInfo),
+		cache:    NewCache(cacheEnabled, cacheDuration),
 	}
 	vc.metrics["system_volumes_bytes"] = newMetricInfo(e.instance, "system_volumes_bytes", "Get system volume info (total/free size).", prometheus.GaugeValue, storageLabelNames, nil)
 	return &vc
@@ -27,6 +29,15 @@ func (vc *VolumeCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (vc *VolumeCollector) Collect(ch chan<- prometheus.Metric) {
+	if vc.cache.ReplayMetrics(ch) {
+		vc.exporter.volumeChan <- true
+		return
+	}
+	samplesCh, wg := vc.cache.StoreAndForwaredMetrics(ch)
+	defer func() {
+		close(samplesCh)
+		wg.Wait()
+	}()
 	type systemVolumesMetric struct {
 		Storage struct {
 			Total float64
@@ -41,10 +52,10 @@ func (vc *VolumeCollector) Collect(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	ch <- prometheus.MustNewConstMetric(
+	samplesCh <- prometheus.MustNewConstMetric(
 		vc.metrics["system_volumes_bytes"].Desc, vc.metrics["system_volumes_bytes"].Type, data.Storage.Total, "total",
 	)
-	ch <- prometheus.MustNewConstMetric(
+	samplesCh <- prometheus.MustNewConstMetric(
 		vc.metrics["system_volumes_bytes"].Desc, vc.metrics["system_volumes_bytes"].Type, data.Storage.Free, "free",
 	)
 	vc.exporter.volumeChan <- true
