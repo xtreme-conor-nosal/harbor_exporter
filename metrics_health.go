@@ -41,6 +41,7 @@ func (hc *HealthCollector) Collect(ch chan<- prometheus.Metric) {
 
 	if err := json.Unmarshal(body, &data); err != nil {
 		level.Error(hc.exporter.logger).Log(err.Error())
+		hc.exporter.healthChan <- false
 		return
 	}
 
@@ -53,4 +54,5 @@ func (hc *HealthCollector) Collect(ch chan<- prometheus.Metric) {
 			hc.metrics["components_health"].Desc, hc.metrics["components_health"].Type, float64(Status2i(c.Status)), c.Name,
 		)
 	}
+	hc.exporter.healthChan <- true
 }

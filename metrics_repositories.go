@@ -84,6 +84,7 @@ func (rc *RepositoryCollector) Collect(ch chan<- prometheus.Metric) {
 	})
 	if err != nil {
 		level.Error(rc.exporter.logger).Log(err.Error())
+		rc.exporter.repositoryChan <- false
 		return
 	}
 
@@ -133,6 +134,7 @@ func (rc *RepositoryCollector) Collect(ch chan<- prometheus.Metric) {
 			})
 			if err != nil {
 				level.Error(rc.exporter.logger).Log(err.Error())
+				rc.exporter.repositoryChan <- false
 				return
 			}
 
@@ -150,4 +152,5 @@ func (rc *RepositoryCollector) Collect(ch chan<- prometheus.Metric) {
 			}
 		}
 	}
+	rc.exporter.repositoryChan <- true
 }

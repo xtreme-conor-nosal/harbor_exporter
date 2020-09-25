@@ -62,6 +62,7 @@ func (qc *QuotaCollector) Collect(ch chan<- prometheus.Metric) {
 	})
 	if err != nil {
 		level.Error(qc.exporter.logger).Log(err.Error())
+		qc.exporter.quotaChan <- false
 		return
 	}
 
@@ -84,4 +85,5 @@ func (qc *QuotaCollector) Collect(ch chan<- prometheus.Metric) {
 			)
 		}
 	}
+	qc.exporter.quotaChan <- true
 }

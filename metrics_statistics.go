@@ -44,6 +44,7 @@ func (sc *StatsCollector) Collect(ch chan<- prometheus.Metric) {
 
 	if err := json.Unmarshal(body, &data); err != nil {
 		level.Error(sc.exporter.logger).Log(err.Error())
+		sc.exporter.statsChan <- false
 		return
 	}
 
@@ -70,4 +71,5 @@ func (sc *StatsCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(
 		sc.metrics["repo_count_total"].Desc, sc.metrics["repo_count_total"].Type, data.Private_repo_count, "private_repo",
 	)
+	sc.exporter.statsChan <- true
 }

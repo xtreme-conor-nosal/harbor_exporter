@@ -43,6 +43,7 @@ func (sc *ScanCollector) Collect(ch chan<- prometheus.Metric) {
 
 	if err := json.Unmarshal(body, &data); err != nil {
 		level.Error(sc.exporter.logger).Log(err.Error())
+		sc.exporter.scanChan <- false
 		return
 	}
 
@@ -58,4 +59,5 @@ func (sc *ScanCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(
 		sc.metrics["scans_completed"].Desc, sc.metrics["scans_completed"].Type, float64(data.Completed),
 	)
+	sc.exporter.scanChan <- true
 }
