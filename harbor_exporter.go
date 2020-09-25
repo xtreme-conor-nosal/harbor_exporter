@@ -98,21 +98,6 @@ func createMetrics(instanceName string) {
 	allMetrics = make(map[string]metricInfo)
 
 	allMetrics["up"] = newMetricInfo(instanceName, "up", "Was the last query of harbor successful.", prometheus.GaugeValue, nil, nil)
-	allMetrics["health"] = newMetricInfo(instanceName, "health", "Harbor overall health status: Healthy = 1, Unhealthy = 0", prometheus.GaugeValue, nil, nil)
-	allMetrics["components_health"] = newMetricInfo(instanceName, "components_health", "Harbor components health status: Healthy = 1, Unhealthy = 0", prometheus.GaugeValue, componentLabelNames, nil)
-	allMetrics["scans_total"] = newMetricInfo(instanceName, "scans_total", "metrics of the latest scan all process", prometheus.GaugeValue, nil, nil)
-	allMetrics["scans_completed"] = newMetricInfo(instanceName, "scans_completed", "metrics of the latest scan all process", prometheus.GaugeValue, nil, nil)
-	allMetrics["scans_requester"] = newMetricInfo(instanceName, "scans_requester", "metrics of the latest scan all process", prometheus.GaugeValue, nil, nil)
-	allMetrics["project_count_total"] = newMetricInfo(instanceName, "project_count_total", "projects number relevant to the user", prometheus.GaugeValue, typeLabelNames, nil)
-	allMetrics["repo_count_total"] = newMetricInfo(instanceName, "repo_count_total", "repositories number relevant to the user", prometheus.GaugeValue, typeLabelNames, nil)
-	allMetrics["quotas_count_total"] = newMetricInfo(instanceName, "quotas_count_total", "quotas", prometheus.GaugeValue, quotaLabelNames, nil)
-	allMetrics["quotas_size_bytes"] = newMetricInfo(instanceName, "quotas_size_bytes", "quotas", prometheus.GaugeValue, quotaLabelNames, nil)
-	allMetrics["system_volumes_bytes"] = newMetricInfo(instanceName, "system_volumes_bytes", "Get system volume info (total/free size).", prometheus.GaugeValue, storageLabelNames, nil)
-	allMetrics["repositories_pull_total"] = newMetricInfo(instanceName, "repositories_pull_total", "Get public repositories which are accessed most.).", prometheus.GaugeValue, repoLabelNames, nil)
-	allMetrics["repositories_star_total"] = newMetricInfo(instanceName, "repositories_star_total", "Get public repositories which are accessed most.).", prometheus.GaugeValue, repoLabelNames, nil)
-	allMetrics["repositories_tags_total"] = newMetricInfo(instanceName, "repositories_tags_total", "Get public repositories which are accessed most.).", prometheus.GaugeValue, repoLabelNames, nil)
-	allMetrics["replication_status"] = newMetricInfo(instanceName, "replication_status", "Get status of the last execution of this replication policy: Succeed = 1, any other status = 0.", prometheus.GaugeValue, replicationLabelNames, nil)
-	allMetrics["replication_tasks"] = newMetricInfo(instanceName, "replication_tasks", "Get number of replication tasks, with various results, in the latest execution of this replication policy.", prometheus.GaugeValue, replicationTaskLabelNames, nil)
 }
 
 type promHTTPLogger struct {
@@ -326,27 +311,7 @@ func (e *HarborExporter) Collect(outCh chan<- prometheus.Metric) {
 	}()
 
 	ok := true
-	if collectMetricsGroup[metricsGroupHealth] {
-		ok = e.collectHealthMetric(samplesCh) && ok
-	}
-	if collectMetricsGroup[metricsGroupScans] {
-		ok = e.collectScanMetric(samplesCh) && ok
-	}
-	if collectMetricsGroup[metricsGroupStatistics] {
-		ok = e.collectStatisticsMetric(samplesCh) && ok
-	}
-	if collectMetricsGroup[metricsGroupStatistics] {
-		ok = e.collectSystemVolumesMetric(samplesCh) && ok
-	}
-	if collectMetricsGroup[metricsGroupQuotas] {
-		ok = e.collectQuotasMetric(samplesCh) && ok
-	}
-	if collectMetricsGroup[metricsGroupRepositories] {
-		ok = e.collectRepositoriesMetric(samplesCh) && ok
-	}
-	if collectMetricsGroup[metricsGroupReplication] {
-		ok = e.collectReplicationsMetric(samplesCh) && ok
-	}
+	// TODO fix up metric
 
 	if ok {
 		samplesCh <- prometheus.MustNewConstMetric(
@@ -424,6 +389,27 @@ func main() {
 	}
 
 	createMetrics(harborInstance.instance)
+	if collectMetricsGroup[metricsGroupHealth] {
+		prometheus.MustRegister(CreateHealthCollector(harborInstance))
+	}
+	if collectMetricsGroup[metricsGroupQuotas] {
+		prometheus.MustRegister(CreateQuotaCollector(harborInstance))
+	}
+	if collectMetricsGroup[metricsGroupReplication] {
+		prometheus.MustRegister(CreateReplicationCollector(harborInstance))
+	}
+	if collectMetricsGroup[metricsGroupRepositories] {
+		prometheus.MustRegister(CreateRepositoryCollector(harborInstance))
+	}
+	if collectMetricsGroup[metricsGroupScans] {
+		prometheus.MustRegister(CreateScanCollector(harborInstance))
+	}
+	if collectMetricsGroup[metricsGroupStatistics] {
+		prometheus.MustRegister(CreateStatsCollector(harborInstance))
+	}
+	if collectMetricsGroup[metricsGroupStatistics] {
+		prometheus.MustRegister(CreateVolumeCollector(harborInstance))
+	}
 
 	prometheus.MustRegister(harborInstance)
 	prometheus.MustRegister(version.NewCollector("harbor_exporter"))
