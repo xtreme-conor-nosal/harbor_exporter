@@ -10,7 +10,7 @@ import (
 )
 
 func (e *HarborExporter) collectRepositoriesMetric(ch chan<- prometheus.Metric) bool {
-	type projectsMetrics []struct {
+	type projectsMetric struct {
 		Project_id  float64
 		Owner_id    float64
 		Name        string
@@ -49,13 +49,15 @@ func (e *HarborExporter) collectRepositoriesMetric(ch chan<- prometheus.Metric) 
 		Creation_time  time.Time
 		Update_time    time.Time
 	}
-	var projectsData projectsMetrics
+	var projectsData []interface{}
 	err := e.requestAll("/projects", func(pageBody []byte) error {
-		var pageData projectsMetrics
+		var pageData []projectsMetric
 		if err := json.Unmarshal(pageBody, &pageData); err != nil {
 			return err
 		}
-		projectsData = append(projectsData, pageData...)
+		for _, i := range pageData {
+			projectsData = append(projectsData, i)
+		}
 
 		return nil
 	})
@@ -63,12 +65,12 @@ func (e *HarborExporter) collectRepositoriesMetric(ch chan<- prometheus.Metric) 
 		level.Error(e.logger).Log(err.Error())
 		return false
 	}
-
-	for i := range projectsData {
-		projectId := strconv.FormatFloat(projectsData[i].Project_id, 'f', 0, 32)
+	repoFunc := func(data interface{}) error {
+		project := data.(projectsMetric)
+		projectId := strconv.FormatFloat(project.Project_id, 'f', 0, 32)
 		if e.isV2 {
 			var data repositoriesMetricV2
-			err := e.requestAll("/projects/"+projectsData[i].Name+"/repositories", func(pageBody []byte) error {
+			err := e.requestAll("/projects/"+project.Name+"/repositories", func(pageBody []byte) error {
 				var pageData repositoriesMetricV2
 				if err := json.Unmarshal(pageBody, &pageData); err != nil {
 					return err
@@ -80,7 +82,7 @@ func (e *HarborExporter) collectRepositoriesMetric(ch chan<- prometheus.Metric) 
 			})
 			if err != nil {
 				level.Error(e.logger).Log(err.Error())
-				return false
+				return err
 			}
 
 			for i := range data {
@@ -110,7 +112,7 @@ func (e *HarborExporter) collectRepositoriesMetric(ch chan<- prometheus.Metric) 
 			})
 			if err != nil {
 				level.Error(e.logger).Log(err.Error())
-				return false
+				return err
 			}
 
 			for i := range data {
@@ -126,6 +128,8 @@ func (e *HarborExporter) collectRepositoriesMetric(ch chan<- prometheus.Metric) 
 				)
 			}
 		}
+		return nil
 	}
-	return true
+
+	return e.doWork(repoFunc, projectsData) == nil
 }
