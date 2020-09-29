@@ -17,6 +17,8 @@ RUN apk --no-cache add ca-certificates
 RUN addgroup -g 1001 appgroup && \
   adduser -H -D -s /bin/false -G appgroup -u 1001 appuser
 
+ENV GOGC=10
+
 USER 1001:1001
 COPY --from=builder /src/releases/harbor_exporter /bin/harbor_exporter
 ENTRYPOINT ["/bin/harbor_exporter"]
