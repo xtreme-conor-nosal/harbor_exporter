@@ -44,7 +44,7 @@ func (rc *RepositoryCollector) Collect(ch chan<- prometheus.Metric) {
 		close(samplesCh)
 		wg.Wait()
 	}()
-	type projectsMetrics []struct {
+	type projectsMetric struct {
 		Project_id  float64
 		Owner_id    float64
 		Name        string
@@ -84,13 +84,15 @@ func (rc *RepositoryCollector) Collect(ch chan<- prometheus.Metric) {
 		Update_time    time.Time
 	}
 
-	var projectsData projectsMetrics
+	var projectsData []projectsMetric
 	err := rc.exporter.requestAll("/projects", func(pageBody []byte) error {
-		var pageData projectsMetrics
+		var pageData []projectsMetric
 		if err := json.Unmarshal(pageBody, &pageData); err != nil {
 			return err
 		}
-		projectsData = append(projectsData, pageData...)
+		for _, i := range pageData {
+			projectsData = append(projectsData, i)
+		}
 
 		return nil
 	})
@@ -100,11 +102,12 @@ func (rc *RepositoryCollector) Collect(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	for i := range projectsData {
-		projectId := strconv.FormatFloat(projectsData[i].Project_id, 'f', 0, 32)
+	repoFunc := func(data interface{}) error {
+		project := data.(projectsMetric)
+		projectId := strconv.FormatFloat(project.Project_id, 'f', 0, 32)
 		if rc.exporter.isV2 {
 			var data repositoriesMetricV2
-			err := rc.exporter.requestAll("/projects/"+projectsData[i].Name+"/repositories", func(pageBody []byte) error {
+			err := rc.exporter.requestAll("/projects/"+project.Name+"/repositories", func(pageBody []byte) error {
 				var pageData repositoriesMetricV2
 				if err := json.Unmarshal(pageBody, &pageData); err != nil {
 					return err
@@ -115,8 +118,8 @@ func (rc *RepositoryCollector) Collect(ch chan<- prometheus.Metric) {
 				return nil
 			})
 			if err != nil {
-				level.Error(rc.exporter.logger).Log(err)
-				return
+				level.Error(rc.exporter.logger).Log(err.Error())
+				return err
 			}
 
 			for i := range data {
@@ -147,7 +150,7 @@ func (rc *RepositoryCollector) Collect(ch chan<- prometheus.Metric) {
 			if err != nil {
 				level.Error(rc.exporter.logger).Log(err.Error())
 				rc.exporter.repositoryChan <- false
-				return
+				return err
 			}
 
 			for i := range data {
@@ -162,6 +165,19 @@ func (rc *RepositoryCollector) Collect(ch chan<- prometheus.Metric) {
 					rc.metrics["repositories_tags_total"].Desc, rc.metrics["repositories_tags_total"].Type, data[i].Tags_count, data[i].Name, repoId,
 				)
 			}
+		}
+		return nil
+	}
+
+	errChan := make(chan error, len(projectsData))
+	defer close(errChan)
+	for i := 0; i < len(projectsData); i++ {
+		repoWorkers.doWork(repoFunc, projectsData[i], errChan)
+	}
+	for i := 0; i < len(projectsData); i++ {
+		e := <-errChan
+		if e != nil {
+			err = e
 		}
 	}
 	rc.exporter.repositoryChan <- true

@@ -65,6 +65,10 @@ func MetricsGroup_Values() []string {
 var (
 	allMetrics          map[string]metricInfo
 	collectMetricsGroup map[string]bool
+	numPageWorkers      int
+	numRepoWorkers      int
+	pageWorkers         *WorkPool
+	repoWorkers         *WorkPool
 
 	componentLabelNames       = []string{"component"}
 	typeLabelNames            = []string{"type"}
@@ -181,40 +185,57 @@ func (h HarborExporter) request(endpoint string) ([]byte, error) {
 }
 
 func (h HarborExporter) requestAll(endpoint string, callback func([]byte) error) error {
-	page := 1
+	_, totalCount, err := h.requestPage(endpoint, 1, 1)
+	if err != nil {
+		return err
+	}
+	pageCount := totalCount / h.pageSize
+	if totalCount%h.pageSize != 0 {
+		pageCount++
+	}
+
+	errChan := make(chan error, pageCount)
+	defer close(errChan)
+	for i := 0; i < pageCount; i++ {
+		pageWorkers.doWork(func(d interface{}) error {
+			body, _, err := h.requestPage(endpoint, d.(int), h.pageSize)
+			if err == nil {
+				err = callback(body)
+			}
+			return err
+		}, i+1, errChan)
+	}
+	for i := 0; i < pageCount; i++ {
+		e := <-errChan
+		if e != nil {
+			err = e
+		}
+	}
+	return err
+}
+
+func (h HarborExporter) requestPage(endpoint string, page int, pageSize int) ([]byte, int, error) {
 	separator := "?"
 	if strings.Index(endpoint, separator) > 0 {
 		separator = "&"
 	}
-	for {
-		path := fmt.Sprintf("%s%spage=%d&page_size=%d", endpoint, separator, page, h.pageSize)
-		body, headers, err := h.fetch(path)
-		if err != nil {
-			return err
-		}
-
-		err = callback(body)
-		if err != nil {
-			return err
-		}
-
-		countStr := headers.Get("x-total-count")
-		if countStr == "" {
-			break
-		}
-
-		count, err := strconv.Atoi(countStr)
-		if err != nil {
-			return err
-		}
-
-		if page*h.pageSize >= count {
-			break
-		}
-
-		page++
+	path := fmt.Sprintf("%s%spage=%d&page_size=%d", endpoint, separator, page, pageSize)
+	body, headers, err := h.fetch(path)
+	if err != nil {
+		return nil, 0, err
 	}
-	return nil
+
+	countStr := headers.Get("x-total-count")
+	if countStr == "" {
+		return nil, 0, fmt.Errorf("header x-total-count missing in response")
+	}
+
+	count, err := strconv.Atoi(countStr)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return body, count, nil
 }
 
 func (h HarborExporter) fetch(endpoint string) ([]byte, http.Header, error) {
@@ -375,6 +396,8 @@ func main() {
 	kingpin.Flag("harbor.timeout", "Timeout on HTTP requests to the harbor API.").Default("500ms").DurationVar(&harborInstance.timeout)
 	kingpin.Flag("harbor.insecure", "Disable TLS host verification.").Default("false").BoolVar(&harborInstance.insecure)
 	kingpin.Flag("harbor.pagesize", "Page size on requests to the harbor API.").Envar("HARBOR_PAGESIZE").Default("500").IntVar(&harborInstance.pageSize)
+	kingpin.Flag("harbor.numpageworkers", "Size of thread pools when fetching pages of results.").Envar("HARBOR_NUMPAGEWORKERS").Default("2").IntVar(&numPageWorkers)
+	kingpin.Flag("harbor.numrepoworkers", "Size of thread pools when fetching repositories of projects.").Envar("HARBOR_NUMREPOWORKERS").Default("2").IntVar(&numRepoWorkers)
 	skip := kingpin.Flag("skip.metrics", "Skip these metrics groups").Enums(MetricsGroup_Values()...)
 	kingpin.Flag("cache.enabled", "Enable metrics caching.").Default("false").BoolVar(&cacheEnabled)
 	kingpin.Flag("cache.duration", "Time duration collected values are cached for.").Default("20s").DurationVar(&cacheDuration)
@@ -402,6 +425,9 @@ func main() {
 	for k, v := range collectMetricsGroup {
 		level.Info(logger).Log("metrics_group", k, "collect", v)
 	}
+
+	pageWorkers = NewWorkPool(numPageWorkers)
+	repoWorkers = NewWorkPool(numRepoWorkers)
 
 	harborInstance.logger = logger
 
