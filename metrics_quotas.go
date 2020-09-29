@@ -8,8 +8,40 @@ import (
 	"time"
 )
 
-func (e *HarborExporter) collectQuotasMetric(ch chan<- prometheus.Metric) bool {
+type QuotaCollector struct {
+	exporter *HarborExporter
+	metrics  map[string]metricInfo
+	cache    *Cache
+}
+
+func CreateQuotaCollector(e *HarborExporter) *QuotaCollector {
+	qc := QuotaCollector{
+		exporter: e,
+		metrics:  make(map[string]metricInfo),
+		cache:    NewCache(cacheEnabled, cacheDuration),
+	}
+	qc.metrics["quotas_count_total"] = newMetricInfo(e.instance, "quotas_count_total", "quotas", prometheus.GaugeValue, quotaLabelNames, nil)
+	qc.metrics["quotas_size_bytes"] = newMetricInfo(e.instance, "quotas_size_bytes", "quotas", prometheus.GaugeValue, quotaLabelNames, nil)
+	return &qc
+}
+
+func (qc *QuotaCollector) Describe(ch chan<- *prometheus.Desc) {
+	for _, m := range qc.metrics {
+		ch <- m.Desc
+	}
+}
+
+func (qc *QuotaCollector) Collect(ch chan<- prometheus.Metric) {
 	start := time.Now()
+	if qc.cache.ReplayMetrics(ch) {
+		qc.exporter.quotaChan <- true
+		return
+	}
+	samplesCh, wg := qc.cache.StoreAndForwaredMetrics(ch)
+	defer func() {
+		close(samplesCh)
+		wg.Wait()
+	}()
 
 	type quotaMetric []struct {
 		Id  float64
@@ -29,8 +61,9 @@ func (e *HarborExporter) collectQuotasMetric(ch chan<- prometheus.Metric) bool {
 			Storage float64
 		}
 	}
+
 	var data quotaMetric
-	err := e.requestAll("/quotas", func(pageBody []byte) error {
+	err := qc.exporter.requestAll("/quotas", func(pageBody []byte) error {
 		var pageData quotaMetric
 		if err := json.Unmarshal(pageBody, &pageData); err != nil {
 			return err
@@ -40,30 +73,31 @@ func (e *HarborExporter) collectQuotasMetric(ch chan<- prometheus.Metric) bool {
 		return nil
 	})
 	if err != nil {
-		level.Error(e.logger).Log(err.Error())
-		return false
+		level.Error(qc.exporter.logger).Log(err.Error())
+		qc.exporter.quotaChan <- false
+		return
 	}
 
 	for i := range data {
 		if data[i].Ref.Name == "" || data[i].Ref.Id == 0 {
-			level.Debug(e.logger).Log(data[i].Ref.Id, data[i].Ref.Name)
+			level.Debug(qc.exporter.logger).Log(data[i].Ref.Id, data[i].Ref.Name)
 		} else {
 			repoid := strconv.FormatFloat(data[i].Ref.Id, 'f', 0, 32)
-			ch <- prometheus.MustNewConstMetric(
-				allMetrics["quotas_count_total"].Desc, allMetrics["quotas_count_total"].Type, data[i].Hard.Count, "hard", data[i].Ref.Name, repoid,
+			samplesCh <- prometheus.MustNewConstMetric(
+				qc.metrics["quotas_count_total"].Desc, qc.metrics["quotas_count_total"].Type, data[i].Hard.Count, "hard", data[i].Ref.Name, repoid,
 			)
-			ch <- prometheus.MustNewConstMetric(
-				allMetrics["quotas_count_total"].Desc, allMetrics["quotas_count_total"].Type, data[i].Used.Count, "used", data[i].Ref.Name, repoid,
+			samplesCh <- prometheus.MustNewConstMetric(
+				qc.metrics["quotas_count_total"].Desc, qc.metrics["quotas_count_total"].Type, data[i].Used.Count, "used", data[i].Ref.Name, repoid,
 			)
-			ch <- prometheus.MustNewConstMetric(
-				allMetrics["quotas_size_bytes"].Desc, allMetrics["quotas_size_bytes"].Type, data[i].Hard.Storage, "hard", data[i].Ref.Name, repoid,
+			samplesCh <- prometheus.MustNewConstMetric(
+				qc.metrics["quotas_size_bytes"].Desc, qc.metrics["quotas_size_bytes"].Type, data[i].Hard.Storage, "hard", data[i].Ref.Name, repoid,
 			)
-			ch <- prometheus.MustNewConstMetric(
-				allMetrics["quotas_size_bytes"].Desc, allMetrics["quotas_size_bytes"].Type, data[i].Used.Storage, "used", data[i].Ref.Name, repoid,
+			samplesCh <- prometheus.MustNewConstMetric(
+				qc.metrics["quotas_size_bytes"].Desc, qc.metrics["quotas_size_bytes"].Type, data[i].Used.Storage, "used", data[i].Ref.Name, repoid,
 			)
 		}
 	}
 
+	qc.exporter.quotaChan <- true
 	reportLatency(start, "quotas_latency", ch)
-	return true
 }

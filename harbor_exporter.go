@@ -24,7 +24,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	// "strings"
@@ -75,6 +74,9 @@ var (
 	storageLabelNames         = []string{"storage"}
 	replicationLabelNames     = []string{"repl_pol_name"}
 	replicationTaskLabelNames = []string{"repl_pol_name", "result"}
+
+	cacheEnabled  bool
+	cacheDuration time.Duration
 )
 
 type metricInfo struct {
@@ -98,27 +100,12 @@ func createMetrics(instanceName string) {
 	allMetrics = make(map[string]metricInfo)
 
 	allMetrics["up"] = newMetricInfo(instanceName, "up", "Was the last query of harbor successful.", prometheus.GaugeValue, nil, nil)
-	allMetrics["health"] = newMetricInfo(instanceName, "health", "Harbor overall health status: Healthy = 1, Unhealthy = 0", prometheus.GaugeValue, nil, nil)
-	allMetrics["components_health"] = newMetricInfo(instanceName, "components_health", "Harbor components health status: Healthy = 1, Unhealthy = 0", prometheus.GaugeValue, componentLabelNames, nil)
 	allMetrics["health_latency"] = newMetricInfo(instanceName, "health_latency", "Time in seconds to collect health metrics", prometheus.GaugeValue, nil, nil)
-	allMetrics["scans_total"] = newMetricInfo(instanceName, "scans_total", "metrics of the latest scan all process", prometheus.GaugeValue, nil, nil)
-	allMetrics["scans_completed"] = newMetricInfo(instanceName, "scans_completed", "metrics of the latest scan all process", prometheus.GaugeValue, nil, nil)
-	allMetrics["scans_requester"] = newMetricInfo(instanceName, "scans_requester", "metrics of the latest scan all process", prometheus.GaugeValue, nil, nil)
 	allMetrics["scans_latency"] = newMetricInfo(instanceName, "scans_latency", "Time in seconds to collect scan metrics", prometheus.GaugeValue, nil, nil)
-	allMetrics["project_count_total"] = newMetricInfo(instanceName, "project_count_total", "projects number relevant to the user", prometheus.GaugeValue, typeLabelNames, nil)
-	allMetrics["repo_count_total"] = newMetricInfo(instanceName, "repo_count_total", "repositories number relevant to the user", prometheus.GaugeValue, typeLabelNames, nil)
 	allMetrics["statistics_latency"] = newMetricInfo(instanceName, "statistics_latency", "Time in seconds to collect statistics metrics", prometheus.GaugeValue, nil, nil)
-	allMetrics["quotas_count_total"] = newMetricInfo(instanceName, "quotas_count_total", "quotas", prometheus.GaugeValue, quotaLabelNames, nil)
-	allMetrics["quotas_size_bytes"] = newMetricInfo(instanceName, "quotas_size_bytes", "quotas", prometheus.GaugeValue, quotaLabelNames, nil)
 	allMetrics["quotas_latency"] = newMetricInfo(instanceName, "quotas_latency", "Time in seconds to collect quota metrics", prometheus.GaugeValue, nil, nil)
-	allMetrics["system_volumes_bytes"] = newMetricInfo(instanceName, "system_volumes_bytes", "Get system volume info (total/free size).", prometheus.GaugeValue, storageLabelNames, nil)
 	allMetrics["system_volumes_latency"] = newMetricInfo(instanceName, "system_volumes_latency", "Time in seconds to collect system_volume metrics", prometheus.GaugeValue, nil, nil)
-	allMetrics["repositories_pull_total"] = newMetricInfo(instanceName, "repositories_pull_total", "Get public repositories which are accessed most.).", prometheus.GaugeValue, repoLabelNames, nil)
-	allMetrics["repositories_star_total"] = newMetricInfo(instanceName, "repositories_star_total", "Get public repositories which are accessed most.).", prometheus.GaugeValue, repoLabelNames, nil)
-	allMetrics["repositories_tags_total"] = newMetricInfo(instanceName, "repositories_tags_total", "Get public repositories which are accessed most.).", prometheus.GaugeValue, repoLabelNames, nil)
 	allMetrics["repositories_latency"] = newMetricInfo(instanceName, "repositories_latency", "Time in seconds to collect repository metrics", prometheus.GaugeValue, nil, nil)
-	allMetrics["replication_status"] = newMetricInfo(instanceName, "replication_status", "Get status of the last execution of this replication policy: Succeed = 1, any other status = 0.", prometheus.GaugeValue, replicationLabelNames, nil)
-	allMetrics["replication_tasks"] = newMetricInfo(instanceName, "replication_tasks", "Get number of replication tasks, with various results, in the latest execution of this replication policy.", prometheus.GaugeValue, replicationTaskLabelNames, nil)
 	allMetrics["replication_latency"] = newMetricInfo(instanceName, "replication_latency", "Time in seconds to collect replication metrics", prometheus.GaugeValue, nil, nil)
 }
 
@@ -141,20 +128,28 @@ type HarborExporter struct {
 	logger   log.Logger
 	isV2     bool
 	pageSize int
-	// Cache-releated
-	cacheEnabled    bool
-	cacheDuration   time.Duration
-	lastCollectTime time.Time
-	cache           []prometheus.Metric
-	collectMutex    sync.Mutex
+	cache    *Cache
+	// status from other collectors
+	healthChan      chan bool
+	quotaChan       chan bool
+	replicationChan chan bool
+	repositoryChan  chan bool
+	scanChan        chan bool
+	statsChan       chan bool
+	volumeChan      chan bool
 }
 
 // NewHarborExporter constructs a HarborExporter instance
 func NewHarborExporter() *HarborExporter {
 	return &HarborExporter{
-		cache:           make([]prometheus.Metric, 0),
-		lastCollectTime: time.Unix(0, 0),
-		collectMutex:    sync.Mutex{},
+		cache:           NewCache(cacheEnabled, cacheDuration),
+		healthChan:      make(chan bool),
+		quotaChan:       make(chan bool),
+		replicationChan: make(chan bool),
+		repositoryChan:  make(chan bool),
+		scanChan:        make(chan bool),
+		statsChan:       make(chan bool),
+		volumeChan:      make(chan bool),
 	}
 }
 
@@ -311,57 +306,39 @@ func (e *HarborExporter) Describe(ch chan<- *prometheus.Desc) {
 // Collect fetches the stats from configured Harbor location and delivers them
 // as Prometheus metrics. It implements prometheus.Collector.
 func (e *HarborExporter) Collect(outCh chan<- prometheus.Metric) {
-	if e.cacheEnabled {
-		e.collectMutex.Lock()
-		defer e.collectMutex.Unlock()
-		expiry := e.lastCollectTime.Add(e.cacheDuration)
-		if time.Now().Before(expiry) {
-			// Return cached
-			for _, cachedMetric := range e.cache {
-				outCh <- cachedMetric
-			}
-			return
-		}
-		// Reset cache for fresh sampling, but re-use underlying array
-		e.cache = e.cache[:0]
-	}
-
-	samplesCh := make(chan prometheus.Metric)
-	// Use WaitGroup to ensure outCh isn't closed before the goroutine is finished
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		for metric := range samplesCh {
-			outCh <- metric
-			if e.cacheEnabled {
-				e.cache = append(e.cache, metric)
-			}
-		}
-		wg.Done()
-	}()
-
 	ok := true
 	if collectMetricsGroup[metricsGroupHealth] {
-		ok = e.collectHealthMetric(samplesCh) && ok
-	}
-	if collectMetricsGroup[metricsGroupScans] {
-		ok = e.collectScanMetric(samplesCh) && ok
-	}
-	if collectMetricsGroup[metricsGroupStatistics] {
-		ok = e.collectStatisticsMetric(samplesCh) && ok
-	}
-	if collectMetricsGroup[metricsGroupStatistics] {
-		ok = e.collectSystemVolumesMetric(samplesCh) && ok
+		ok = <-e.healthChan && ok
 	}
 	if collectMetricsGroup[metricsGroupQuotas] {
-		ok = e.collectQuotasMetric(samplesCh) && ok
-	}
-	if collectMetricsGroup[metricsGroupRepositories] {
-		ok = e.collectRepositoriesMetric(samplesCh) && ok
+		ok = <-e.quotaChan && ok
 	}
 	if collectMetricsGroup[metricsGroupReplication] {
-		ok = e.collectReplicationsMetric(samplesCh) && ok
+		ok = <-e.replicationChan && ok
 	}
+	if collectMetricsGroup[metricsGroupRepositories] {
+		ok = <-e.repositoryChan && ok
+	}
+	if collectMetricsGroup[metricsGroupScans] {
+		ok = <-e.scanChan && ok
+	}
+	if collectMetricsGroup[metricsGroupStatistics] {
+		ok = <-e.statsChan && ok
+	}
+	if collectMetricsGroup[metricsGroupStatistics] {
+		ok = <-e.volumeChan && ok
+	}
+
+	// channels are read before checking cache to avoid deadlock if some collectors use cached results
+	if e.cache.ReplayMetrics(outCh) {
+		return
+	}
+
+	samplesCh, wg := e.cache.StoreAndForwaredMetrics(outCh)
+	defer func() {
+		close(samplesCh)
+		wg.Wait()
+	}()
 
 	if ok {
 		samplesCh <- prometheus.MustNewConstMetric(
@@ -374,10 +351,6 @@ func (e *HarborExporter) Collect(outCh chan<- prometheus.Metric) {
 			0.0,
 		)
 	}
-
-	close(samplesCh)
-	e.lastCollectTime = time.Now()
-	wg.Wait()
 }
 
 // Status2i converts health status to int8
@@ -403,8 +376,8 @@ func main() {
 	kingpin.Flag("harbor.insecure", "Disable TLS host verification.").Default("false").BoolVar(&harborInstance.insecure)
 	kingpin.Flag("harbor.pagesize", "Page size on requests to the harbor API.").Envar("HARBOR_PAGESIZE").Default("500").IntVar(&harborInstance.pageSize)
 	skip := kingpin.Flag("skip.metrics", "Skip these metrics groups").Enums(MetricsGroup_Values()...)
-	kingpin.Flag("cache.enabled", "Enable metrics caching.").Default("false").BoolVar(&harborInstance.cacheEnabled)
-	kingpin.Flag("cache.duration", "Time duration collected values are cached for.").Default("20s").DurationVar(&harborInstance.cacheDuration)
+	kingpin.Flag("cache.enabled", "Enable metrics caching.").Default("false").BoolVar(&cacheEnabled)
+	kingpin.Flag("cache.duration", "Time duration collected values are cached for.").Default("20s").DurationVar(&cacheDuration)
 
 	promlogConfig := &promlog.Config{}
 	flag.AddFlags(kingpin.CommandLine, promlogConfig)
@@ -412,8 +385,8 @@ func main() {
 	kingpin.Parse()
 	logger := promlog.New(promlogConfig)
 
-	level.Info(logger).Log("CacheEnabled", harborInstance.cacheEnabled)
-	level.Info(logger).Log("CacheDuration", harborInstance.cacheDuration)
+	level.Info(logger).Log("CacheEnabled", cacheEnabled)
+	level.Info(logger).Log("CacheDuration", cacheDuration)
 
 	level.Info(logger).Log("msg", "Starting harbor_exporter", "version", version.Info())
 	level.Info(logger).Log("build_context", version.BuildContext())
@@ -439,6 +412,27 @@ func main() {
 	}
 
 	createMetrics(harborInstance.instance)
+	if collectMetricsGroup[metricsGroupHealth] {
+		prometheus.MustRegister(CreateHealthCollector(harborInstance))
+	}
+	if collectMetricsGroup[metricsGroupQuotas] {
+		prometheus.MustRegister(CreateQuotaCollector(harborInstance))
+	}
+	if collectMetricsGroup[metricsGroupReplication] {
+		prometheus.MustRegister(CreateReplicationCollector(harborInstance))
+	}
+	if collectMetricsGroup[metricsGroupRepositories] {
+		prometheus.MustRegister(CreateRepositoryCollector(harborInstance))
+	}
+	if collectMetricsGroup[metricsGroupScans] {
+		prometheus.MustRegister(CreateScanCollector(harborInstance))
+	}
+	if collectMetricsGroup[metricsGroupStatistics] {
+		prometheus.MustRegister(CreateStatsCollector(harborInstance))
+	}
+	if collectMetricsGroup[metricsGroupStatistics] {
+		prometheus.MustRegister(CreateVolumeCollector(harborInstance))
+	}
 
 	prometheus.MustRegister(harborInstance)
 	prometheus.MustRegister(version.NewCollector("harbor_exporter"))
