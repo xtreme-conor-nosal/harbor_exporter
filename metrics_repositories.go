@@ -131,5 +131,16 @@ func (e *HarborExporter) collectRepositoriesMetric(ch chan<- prometheus.Metric) 
 		return nil
 	}
 
-	return e.doWork(repoFunc, projectsData) == nil
+	errChan := make(chan error, len(projectsData))
+	defer close(errChan)
+	for i := 0; i < len(projectsData); i++ {
+		repoWorkers.doWork(repoFunc, projectsData[i], errChan)
+	}
+	for i := 0; i < len(projectsData); i++ {
+		e := <-errChan
+		if e != nil {
+			err = e
+		}
+	}
+	return err == nil
 }
